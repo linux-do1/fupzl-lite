@@ -1,6 +1,9 @@
 import pathlib
 import re
+import urllib.error
+import urllib.request
 
+import pytest
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -123,7 +126,7 @@ def test_oneshot_manual_cookie_refresh_string_false_precedes_repository_config()
     # "false" wins the selector before any repository Variable or Secret.
     assert input_config.get("type", "string") == "string"
     assert refresh_expr.startswith(
-        "${{ github.event_name == 'workflow_dispatch' && inputs.cookie_refresh_enabled || "
+        "${{ github.event_name == 'workflow_dispatch' && inputs.cookie_refresh_enabled != 'configured' && inputs.cookie_refresh_enabled || "
     )
     ordered_sources = [
         "inputs.cookie_refresh_enabled",
@@ -139,10 +142,11 @@ def test_oneshot_manual_cookie_refresh_string_false_precedes_repository_config()
 
 
 def test_oneshot_topic_quota_defaults_match_two_daily_schedules():
-    raw = (ROOT / ".github" / "workflows" / "oneshot.yml").read_text(encoding="utf-8")
+    raw = (ROOT / ".github" / "workflows" / "scheduler.yml").read_text(encoding="utf-8-sig")
     workflow = load_workflow("oneshot.yml")
     env = workflow["jobs"]["oneshot"]["env"]
 
+    assert "schedule" not in workflow[True]
     assert raw.count("    - cron:") == 2
     assert "|| '500'" in env["LITEFUPZL_MONTHLY_TOPIC_TARGET"]
     assert "|| '2'" in env["LITEFUPZL_SCHEDULE_RUNS_PER_DAY"]
@@ -301,3 +305,73 @@ def test_oneshot_runs_through_hard_watchdog():
     assert env["LITEFUPZL_WATCHDOG_PRE_LOGIN_SECONDS"].endswith("|| '600' }}")
     assert env["LITEFUPZL_WATCHDOG_COOKIE_SYNC_SECONDS"].endswith("|| '120' }}")
     assert env["LITEFUPZL_WATCHDOG_DRIVER_CLEANUP_SECONDS"].endswith("|| '60' }}")
+
+
+def test_scheduler_dispatches_fork_default_branch_with_existing_pat_only():
+    workflow = load_workflow("scheduler.yml")
+    assert set(workflow[True]) == {"schedule", "workflow_dispatch"}
+    assert workflow["jobs"]["dispatch"]["runs-on"] == "ubuntu-24.04"
+    assert workflow["jobs"]["dispatch"]["timeout-minutes"] == 5
+    step = _step(workflow, "dispatch", "Dispatch oneshot")
+    assert step["env"]["ONESHOT_REF"] == "${{ github.event.repository.default_branch }}"
+    assert step["env"]["SCHEDULER_TOKEN"] == "${{ secrets.LITEFUPZL_ACTIONS_ADMIN_TOKEN || secrets.FUCKPZL_ACTIONS_ADMIN_TOKEN }}"
+    assert "COOKIES" not in str(workflow)
+    assert "runtime_report.py" not in str(workflow)
+    assert "oneshot" not in workflow["jobs"]
+    assert _step(workflow, "dispatch", "Checkout")["with"]["persist-credentials"] is False
+    for step in _steps(workflow, "dispatch"):
+        if "uses" in step:
+            assert re.fullmatch(r"actions/[A-Za-z0-9_.-]+@[0-9a-f]{40}", step["uses"])
+
+
+def test_runtime_report_is_isolated_from_cookie_process_and_nonblocking():
+    workflow = load_workflow("oneshot.yml")
+    steps = _steps(workflow, "oneshot")
+    report = _step(workflow, "oneshot", "Publish runtime report")
+    assert report["if"] == "always()"
+    assert report["continue-on-error"] is True
+    assert report["timeout-minutes"] == 5
+    assert steps.index(report) > steps.index(_step(workflow, "oneshot", "Run oneshot"))
+    assert report["env"]["RUNTIME_REPORT_TOKEN"] == "${{ secrets.LITEFUPZL_ACTIONS_ADMIN_TOKEN || secrets.FUCKPZL_ACTIONS_ADMIN_TOKEN }}"
+    assert report["env"]["REPORT_STEP_OUTCOME"] == "${{ steps.run_oneshot.outcome }}"
+    assert "LITEFUPZL_COOKIES_JSON" not in report["env"]
+    assert report["env"]["LITEFUPZL_PROXY_SERVER"] == ""
+    assert report["env"]["LITEFUPZL_MUTUAL_LIKE_USERS_JSON"] == ""
+    assert "runtime_report.py" in report["run"]
+    assert "watchdog.py" not in report["run"]
+    assert "GITHUB_TOKEN" not in report["env"]
+
+
+def test_execution_run_cleanup_does_not_count_scheduler_runs():
+    workflow = load_workflow("oneshot.yml")
+    script = _step(workflow, "oneshot", "Cleanup old workflow runs")["run"]
+    assert "actions/workflows/oneshot.yml/runs" in script
+
+
+@pytest.mark.parametrize("filename,job", [("oneshot.yml", "oneshot"), ("probes.yml", "probe")])
+def test_workflow_cleanup_rejects_authenticated_redirects(filename, job, monkeypatch, capsys):
+    script = _step(load_workflow(filename), job, "Cleanup old workflow runs")["run"]
+    python_source = script.split("python - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    calls = []
+
+    def build_opener(handler):
+        class Opener:
+            def open(self, request, timeout):
+                calls.append(request.full_url)
+                assert request.get_header("Authorization") == "Bearer synthetic-token"
+                assert handler.redirect_request(
+                    request, None, 302, "Found", {}, "https://untrusted.invalid/collect"
+                ) is None
+                raise urllib.error.HTTPError(request.full_url, 302, "Found", {}, None)
+
+        return Opener()
+
+    monkeypatch.setattr(urllib.request, "build_opener", build_opener)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("ACTIONS_CLEANUP_TOKEN", "synthetic-token")
+    with pytest.raises(SystemExit) as result:
+        exec(compile(python_source, filename, "exec"), {})
+    assert result.value.code == 0
+    assert len(calls) == 1
+    assert calls[0].startswith("https://api.github.com/repos/owner/repo/")
+    assert "cleanup_fetch_failed=status_302" in capsys.readouterr().out

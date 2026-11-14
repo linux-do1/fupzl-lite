@@ -19,7 +19,9 @@ write action is the bounded mutual-like pass described below.
 - Optional mutual-like pass for configured usernames.
 - Per-browser `/topics/timings` status diagnostics in redacted logs.
 - Default-on cookie refresh from the already-authenticated browser context; set it to `false` to disable write-back.
-- Manual and scheduled runs share the same cookie-refresh switch.
+- A lightweight scheduler dispatches the actual oneshot using the existing PAT.
+- Timestamped runtime report Releases retain the latest 15 generated report/tag pairs.
+- Dispatched scheduled runs preserve the repository cookie-refresh switch.
 - Camoufox `0.5.5`, Playwright `1.60.0`, the Camoufox browser asset, its
   SHA-256 digest, and the scheduled Ubuntu 24.04 runner are pinned.
 - A Playwright browser-driver crash is classified separately from an invalid
@@ -141,15 +143,22 @@ Multi-account example:
 
 #### `LITEFUPZL_ACTIONS_ADMIN_TOKEN`
 
-Optional. A GitHub token used by the default-on cookie refresh path when a
-rotated `_t` must be persisted, or for workflow-run cleanup permissions beyond
-the default workflow token.
+One PAT is shared by scheduled dispatch, same-context Cookie Secret refresh,
+and runtime report publication/retention. No additional Token Secret is needed.
+The legacy administrator-token Secret name remains supported.
 
-Recommended permissions:
+For a fine-grained PAT, select only your own fork and grant:
 
-- `actions:read`
-- `actions:write`
-- `secrets:write`
+- **Actions: Read and write** - dispatch the oneshot workflow;
+- **Contents: Read and write** - create report tags/Releases and delete old reports;
+- **Secrets: Read and write** - persist the final durable Cookie;
+- **Metadata: Read** - included by GitHub.
+
+The PAT is injected separately into the dispatch, Cookie refresh, and report
+steps. It is not passed to checkout, dependency installation, or report assets.
+A missing/expired PAT makes dispatch fail visibly. A report permission failure
+is reported as a warning without rerunning authentication or replacing its
+result. Local runs can omit the PAT when Cookie refresh is disabled.
 
 Do not place this token in code, commits, logs, or artifacts.
 
@@ -307,6 +316,56 @@ Variables and Secrets.
 For local runs, use the same names as environment variables or put them in
 `.env.local`.
 
+## Scheduling and runtime report Releases
+
+The two workflow entry points have separate responsibilities:
+
+1. **litefupzl scheduler** (`scheduler.yml`) runs at 01:30 and 07:30 UTC
+   (09:30 and 15:30 UTC+8). It uses the existing PAT to dispatch `oneshot.yml`
+   on the current fork's default branch. There is no hardcoded owner or branch.
+2. **litefupzl oneshot** (`oneshot.yml`) accepts only `workflow_dispatch`.
+   It keeps the existing serialized browser/Cookie lifecycle and manual inputs.
+   Scheduler success means the dispatch was accepted; check the separate
+   oneshot run or its report for the execution result.
+
+Fork owners must enable Actions, add the Cookie Secret and the existing PAT,
+and enable **litefupzl scheduler**. Do not edit or reuse the upstream owner's
+account credentials. The scheduler does not re-enable a manually disabled
+oneshot; the owner must deliberately enable it again.
+
+After the reader exits and final same-context Cookie synchronization finishes,
+**Publish runtime report** runs even after setup/reader failures where the job
+can still run steps. Each report uses a UTC timestamp, run ID, and attempt:
+
+```text
+runtime-20261114T163000Z-123456789-1
+```
+
+Each report Release contains only newly generated `report.json` and `report.md`.
+They contain allowlisted execution states, phase/warning codes, boolean checks,
+counts and timing metadata. They never publish raw stdout, WARP/proxy logs,
+Cookie/token values, usernames, full user agents, device names, IPs, locations,
+or topic identifiers. Existing detailed artifacts remain a separate manual
+opt-in. Missing or malformed input produces a safe unavailable report.
+
+The new Release is uploaded completely before pruning. Only records owned by
+this report publisher, using its strict `runtime-*` naming and ownership marker,
+are eligible. Retention keeps the newest **15 published reports** and removes
+each old Release together with its matching annotated tag. Owned incomplete
+drafts and orphan tags are reconciled after a successful publication. Other
+version tags/Releases are preserved. Report Releases set `make_latest=false`
+and do not alter the default branch. Publication/cleanup failure cannot retry
+the reader or overwrite its
+exit result. Hard runner loss or cancellation can prevent a report from being
+published.
+
+Creating timestamped report tags provides repository activity without dummy
+commits. This aims to reduce inactivity-related schedule shutdowns; GitHub does
+not document a guarantee that these operations reset its 60-day inactivity
+clock. Splitting workflows alone cannot revive a scheduler already disabled by
+GitHub. Manual dispatch remains available, and PAT expiry or platform-level
+Actions restrictions still require owner action.
+
 ## Manual workflow inputs
 
 ### Main run
@@ -322,8 +381,11 @@ Default: `true`. Set it to `false` to disable refreshed-cookie write-back for a
 manual run. The explicit string `false` takes priority over any repository
 Variable or Secret configured as `true`.
 
-Scheduled runs do not read this manual input. They use repository Variable or
-Secret `LITEFUPZL_COOKIE_REFRESH_ENABLED` (with the legacy alias retained).
+`scheduler.yml` passes the reserved string `configured`, which resolves the
+repository Variable/Secret `LITEFUPZL_COOKIE_REFRESH_ENABLED` (including its
+legacy alias). This prevents the dispatch default `true` from overriding a
+repository-level `false`. Direct manual runs still default to `true`; enter
+`configured` to follow the repository policy.
 
 #### `cookie_refresh_probe`
 

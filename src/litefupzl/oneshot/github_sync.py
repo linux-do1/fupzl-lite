@@ -6,7 +6,7 @@ import asyncio
 import base64
 import json
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from nacl import encoding, public
 
@@ -23,6 +23,18 @@ class CookieRefreshError(RuntimeError):
 
 COOKIE_SECRET_NAME = "LITEFUPZL_COOKIES_JSON"
 VOLATILE_COOKIE_NAMES = {"_forum_session", "cf_clearance"}
+
+
+class _RejectRedirect(HTTPRedirectHandler):
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        return None
+
+
+_URL_OPENER = build_opener(_RejectRedirect())
+
+
+def _open_request(request):
+    return _URL_OPENER.open(request)
 
 
 def _cookie_string_equivalent(left: str, right: str) -> bool:
@@ -92,8 +104,10 @@ def update_repository_secret(
     secret_name: str,
     secret_value: str,
     api_url: str = "https://api.github.com",
+    opener=None,
 ) -> None:
     try:
+        open_request = opener or _open_request
         owner, repo = repository.split("/", 1)
         headers = {
             "Authorization": f"Bearer {admin_token}",
@@ -106,7 +120,7 @@ def update_repository_secret(
             f"{api_url}/repos/{owner}/{repo}/actions/secrets/public-key",
             headers=headers,
         )
-        with urlopen(req) as resp:
+        with open_request(req) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
 
         public_key = public.PublicKey(payload["key"].encode("utf-8"), encoding.Base64Encoder())
@@ -125,7 +139,7 @@ def update_repository_secret(
             headers=headers,
             method="PUT",
         )
-        with urlopen(req):
+        with open_request(req):
             return None
     except HTTPError as exc:
         raise CookieRefreshError(f"COOKIE_REFRESH_HTTP_{exc.code}") from exc

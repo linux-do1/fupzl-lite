@@ -12,6 +12,16 @@ class _CookieContext:
         ]
 
 
+def test_authenticated_secret_transport_rejects_redirects():
+    from litefupzl.oneshot import github_sync
+
+    handler = next(
+        item for item in github_sync._URL_OPENER.handlers if isinstance(item, github_sync._RejectRedirect)
+    )
+
+    assert handler.redirect_request(None, None, 302, "", {}, "https://untrusted.invalid") is None
+
+
 @pytest.mark.asyncio
 async def test_cookie_refresh_persists_latest_context_token_and_updates_slot_source(monkeypatch):
     from litefupzl.oneshot import github_sync

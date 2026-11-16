@@ -15,18 +15,30 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 ROOT = Path(__file__).resolve().parents[2]
 CORE_SRC = ROOT / "src"
 if str(CORE_SRC) not in sys.path:
     sys.path.insert(0, str(CORE_SRC))
 
-from litefupzl.oneshot.github_sync import refresh_slot_cookie_secret_from_context
-from litefupzl.oneshot.redaction import install_sensitive_output_guard
+from litefupzl.oneshot.github_sync import refresh_slot_cookie_secret_from_context  # noqa: E402
+from litefupzl.oneshot.redaction import install_sensitive_output_guard  # noqa: E402
 
 _BASE_URL = "https://linux.do"
 _PROBE_SECRET_NAME = "LITEFUPZL_COOKIE_REFRESH_PROBE"
+
+
+class _RejectRedirect(HTTPRedirectHandler):
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        return None
+
+
+_URL_OPENER = build_opener(_RejectRedirect())
+
+
+def _open_request(request):
+    return _URL_OPENER.open(request)
 
 
 class _StaticCookieContext:
@@ -53,7 +65,9 @@ def get_repository_secret_metadata(
     repository: str,
     secret_name: str,
     api_url: str = "https://api.github.com",
+    opener=None,
 ) -> dict:
+    open_request = opener or _open_request
     owner, repo = repository.split("/", 1)
     req = Request(
         f"{api_url}/repos/{owner}/{repo}/actions/secrets/{secret_name}",
@@ -64,7 +78,7 @@ def get_repository_secret_metadata(
         },
     )
     try:
-        with urlopen(req) as resp:
+        with open_request(req) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except HTTPError as exc:
         return {"status_code": exc.code}

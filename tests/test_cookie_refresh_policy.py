@@ -5,6 +5,18 @@ import pytest
 from litefupzl.oneshot.models import SlotConfig, SlotResult, SlotStatus, WarningCode, utc_now_iso
 
 
+def test_cookie_refresh_probe_metadata_transport_rejects_redirects():
+    from apps.litefupzl import cookie_refresh_probe
+
+    handler = next(
+        item
+        for item in cookie_refresh_probe._URL_OPENER.handlers
+        if isinstance(item, cookie_refresh_probe._RejectRedirect)
+    )
+
+    assert handler.redirect_request(None, None, 302, "", {}, "https://untrusted.invalid") is None
+
+
 @pytest.mark.asyncio
 async def test_schedule_does_not_bypass_runtime_cookie_refresh_when_enabled(monkeypatch):
     from litefupzl.oneshot import session
